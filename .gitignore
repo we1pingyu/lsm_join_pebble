@@ -2,6 +2,7 @@ tmp/
 R/
 S/
 tmp/
-S_index/
+S_Index/
+R_Index/
 go.mod
 go.sum
