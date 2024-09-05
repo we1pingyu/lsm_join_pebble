@@ -87,6 +87,7 @@ func buildCoveringCompositeIndex(db *pebble.DB, index *pebble.DB, data []uint64,
 	dataTime, indexTime := 0.0, 0.0
 	deletes := 0
 	inserts := 0
+
 	for i := 0; i < len(data); i++ {
 		if (i+1)%5000000 == 0 {
 			fmt.Printf("%d million\n", (i+1)/1000000)
@@ -336,7 +337,6 @@ func buildCoveringLazyIndex(db *pebble.DB, index *pebble.DB, data []uint64, pk [
 
 func buildEagerIndex(index *pebble.DB, data []uint64, pk []uint64, totalValueSize int, secondarySize int, primarySize int, batchSize int) {
 	fmt.Println("Building eager index with batch writes...")
-	usePk := len(pk) != 0
 	updateTime, eagerTime := 0.0, 0.0
 
 	indexBatch := index.NewBatch()
@@ -349,10 +349,8 @@ func buildEagerIndex(index *pebble.DB, data []uint64, pk []uint64, totalValueSiz
 		}
 
 		tmpSecondary := fmt.Sprintf("%0*s%d", secondarySize-min(secondarySize, len(fmt.Sprintf("%d", data[i]))), "", data[i])
-		tmpPrimary := fmt.Sprintf("%0*s%d", primarySize-min(primarySize, len(fmt.Sprintf("%d", i))), "", i)
-		if usePk {
-			tmpPrimary = fmt.Sprintf("%010d", pk[i])
-		}
+		tmpPrimary := fmt.Sprintf("%010d", pk[i])
+
 		timer1 := time.Now()
 
 		tmpPrimaryVal, closer, err := index.Get([]byte(tmpSecondary))
@@ -417,7 +415,6 @@ func buildEagerIndex(index *pebble.DB, data []uint64, pk []uint64, totalValueSiz
 
 func buildCoveringEagerIndex(db *pebble.DB, index *pebble.DB, data []uint64, pk []uint64, totalValueSize int, secondarySize int, primarySize int, nonCovering bool, batchSize int) {
 	fmt.Println("Building covering eager index with batch writes...")
-	usePk := len(pk) != 0
 	rest := strings.Repeat("0", totalValueSize-secondarySize)
 
 	indexBatch := index.NewBatch()
@@ -429,36 +426,51 @@ func buildCoveringEagerIndex(db *pebble.DB, index *pebble.DB, data []uint64, pk 
 	pendingBatch := make(map[string]string)
 	pendingBatchDB := make(map[string]string)
 
+	var start_time time.Time
+	index_get_time := 0.0
+	db_get_time := 0.0
+	index_set_time := 0.0
+	db_set_time := 0.0
+	pending_time := 0.0
+	var tmpPrimary string
+	var newValue string
 	for i := 0; i < len(data); i++ {
 		if (i+1)%5000000 == 0 {
 			fmt.Printf("%d million\n", (i+1)/1000000)
 		}
 
-		tmpPrimary := fmt.Sprintf("%0*s%d", primarySize-min(primarySize, len(fmt.Sprintf("%d", i))), "", i)
-		if usePk {
-			tmpPrimary = fmt.Sprintf("%010d", pk[i])
-		}
-
+		tmpPrimary = fmt.Sprintf("%010d", pk[i])
 		tmpSecondary := fmt.Sprintf("%0*s%d%s", secondarySize-min(secondarySize, len(fmt.Sprintf("%d", data[i]))), "", data[i], rest)
+		// fmt.Println("tmpPrimary: ", tmpPrimary, "tmpSecondary: ", tmpSecondary)
 
 		// Step 1: Retrieve and delete old primary key references if necessary
+		// start_time := time.Now()
 		previousSecondary, closer, err := db.Get([]byte(tmpPrimary))
 		if err == nil {
 			closer.Close()
 		}
+		// db_get_time += time.Since(start_time).Seconds()
 		previousSecondarystr := string(previousSecondary)
+		// tmp_start_time := time.Now()
 		if existingValueInBatch, found := pendingBatchDB[tmpPrimary]; found {
 			previousSecondarystr += existingValueInBatch
 		}
+		// pending_time += time.Since(tmp_start_time).Seconds()
 		if len(previousSecondarystr) > 0 {
+			// start_time := time.Now()
 			oldValue, closer2, err := index.Get([]byte(previousSecondarystr[:secondarySize]))
 			if err == nil {
 				closer2.Close()
 			}
+			// index_get_time += time.Since(start_time).Seconds()
+
+			// start_time = time.Now()
+			// tmp_start_time := time.Now()
 			oldValuestr := string(oldValue)
 			if existingValueInBatch, found := pendingBatch[previousSecondarystr]; found {
 				oldValuestr += existingValueInBatch
 			}
+			// pending_time += time.Since(tmp_start_time).Seconds()
 			if len(oldValuestr) > 0 {
 				valueSplit := SplitStringEveryNChars(oldValuestr, totalValueSize)
 				newValueSplit := []string{}
@@ -477,70 +489,80 @@ func buildCoveringEagerIndex(db *pebble.DB, index *pebble.DB, data []uint64, pk 
 					pendingBatch[previousSecondarystr[:secondarySize]] = newValue
 				}
 			}
+			// index_set_time += time.Since(start_time).Seconds()
 		}
 
 		// Step 2: Add or update the current entry in the index
+		// start_time = time.Now()
 		existingValue := ""
+		// tmp_start_time = time.Now()
 		if existingValueInBatch, found := pendingBatch[tmpSecondary[:secondarySize]]; found {
 			existingValue = existingValueInBatch
-		} else if tmpPrimaryVal, closer, err := index.Get([]byte(tmpSecondary[:secondarySize])); err == nil && len(tmpPrimaryVal) > 0 {
-			defer closer.Close()
+			// pending_time += time.Since(tmp_start_time).Seconds()
+		} else if tmpPrimaryVal, closer, err := index.Get([]byte(tmpSecondary[:secondarySize])); err == nil {
+			closer.Close()
 			existingValue = string(tmpPrimaryVal)
 		}
+		// index_get_time += time.Since(start_time).Seconds()
 
-		var newValue string
 		if nonCovering {
 			newValue = tmpPrimary + existingValue
 		} else {
 			newValue = tmpPrimary + rest + existingValue
 		}
 
+		// start_time = time.Now()
 		indexBatch.Set([]byte(tmpSecondary[:secondarySize]), []byte(newValue), nil)
 		pendingBatch[tmpSecondary[:secondarySize]] = newValue
+		// index_set_time += time.Since(start_time).Seconds()
 
 		// Step 3: Insert the new key-value pair into the primary database
+		start_time = time.Now()
 		dbBatch.Set([]byte(tmpPrimary), []byte(tmpSecondary), nil)
 		pendingBatchDB[tmpPrimary] = tmpSecondary
+		db_set_time += time.Since(start_time).Seconds()
 
 		// Commit batches if necessary
 		if (i+1)%batchSize == 0 {
+			// start_time = time.Now()
 			err := indexBatch.Commit(pebble.Sync)
 			if err != nil {
 				log.Fatalf("Failed to commit index batch: %v", err)
 			}
 			indexBatch.Reset()
 			pendingBatch = make(map[string]string)
+			// index_set_time += time.Since(start_time).Seconds()
 
+			start_time = time.Now()
 			err = dbBatch.Commit(pebble.Sync)
 			if err != nil {
 				log.Fatalf("Failed to commit db batch: %v", err)
 			}
 			dbBatch.Reset()
+			pendingBatchDB = make(map[string]string)
+			db_set_time += time.Since(start_time).Seconds()
 		}
 	}
 
 	// Final batch commit
+	// start_time = time.Now()
 	if indexBatch.Count() > 0 {
 		err := indexBatch.Commit(pebble.Sync)
 		if err != nil {
 			log.Fatalf("Failed to commit remaining index batch: %v", err)
 		}
 	}
+	// index_set_time += time.Since(start_time).Seconds()
 
+	start_time = time.Now()
 	if dbBatch.Count() > 0 {
 		err := dbBatch.Commit(pebble.Sync)
 		if err != nil {
 			log.Fatalf("Failed to commit remaining db batch: %v", err)
 		}
 	}
+	db_set_time += time.Since(start_time).Seconds()
 
-	// Debugging: count the number of entries in the index
-	its, _ := index.NewIter(nil)
-	defer its.Close()
-	count := 0
-	for its.First(); its.Valid(); its.Next() {
-		valueSet := SplitStringEveryNChars(string(its.Value()), totalValueSize)
-		count += len(valueSet)
-	}
-	fmt.Println("!!!index count: ", count)
+	fmt.Println("getDataTime: ", db_get_time, "index_get_time: ", index_get_time, "index_set_time: ", index_set_time, "db_set_time: ", db_set_time)
+	fmt.Println("pending_time: ", pending_time)
 }

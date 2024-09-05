@@ -11,6 +11,8 @@ import (
 	// "time"
 
 	"github.com/cockroachdb/pebble"
+	// "github.com/cockroachdb/pebble/base"
+	"github.com/cockroachdb/pebble/bloom"
 )
 
 // func main() {
@@ -234,7 +236,6 @@ func printLevelSizes(db *pebble.DB) {
 }
 
 func openPebbleDB(dbPath string, memTableSize uint64) (*pebble.DB, error) {
-	// 如果数据库目录存在，则将其删除
 	if _, err := os.Stat(dbPath); err == nil {
 		err = os.RemoveAll(dbPath)
 		if err != nil {
@@ -244,20 +245,23 @@ func openPebbleDB(dbPath string, memTableSize uint64) (*pebble.DB, error) {
 	}
 
 	db, err := pebble.Open(dbPath, &pebble.Options{
-		MemTableSize:                memTableSize,
+		MaxOpenFiles: 65536,
+		MemTableSize: memTableSize,
 		MemTableStopWritesThreshold: 4,
 		L0CompactionThreshold:       2,
 		L0StopWritesThreshold:       4,
 		Levels: []pebble.LevelOptions{
-			{Compression: pebble.NoCompression},
-			{Compression: pebble.NoCompression},
-			{Compression: pebble.NoCompression},
-			{Compression: pebble.NoCompression},
-			{Compression: pebble.NoCompression},
-			{Compression: pebble.NoCompression},
-			{Compression: pebble.NoCompression},
+			{Compression: pebble.NoCompression, FilterPolicy: bloom.FilterPolicy(20), FilterType: pebble.TableFilter, TargetFileSize: 16 << 20},
+			{Compression: pebble.NoCompression, FilterPolicy: bloom.FilterPolicy(20), FilterType: pebble.TableFilter, TargetFileSize: 16 << 20},
+			{Compression: pebble.NoCompression, FilterPolicy: bloom.FilterPolicy(20), FilterType: pebble.TableFilter, TargetFileSize: 16 << 20},
+			{Compression: pebble.NoCompression, FilterPolicy: bloom.FilterPolicy(20), FilterType: pebble.TableFilter, TargetFileSize: 16 << 20},
+			{Compression: pebble.NoCompression, FilterPolicy: bloom.FilterPolicy(20), FilterType: pebble.TableFilter, TargetFileSize: 16 << 20},
+			{Compression: pebble.NoCompression, FilterPolicy: bloom.FilterPolicy(20), FilterType: pebble.TableFilter, TargetFileSize: 16 << 20},
+			{Compression: pebble.NoCompression, FilterPolicy: bloom.FilterPolicy(20), FilterType: pebble.TableFilter, TargetFileSize: 16 << 20},
 		},
-	})
+		Cache: pebble.NewCache(4096 << 20),
+	},
+	)
 	if err != nil {
 		return nil, err
 	}

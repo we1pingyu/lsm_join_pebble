@@ -11,34 +11,34 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
-func HJ(file_path_r string, file_path_s string) {
+func HJ(file_path_r string, file_path_s string, tuples int, totalValueSize int) {
 	db_r, _ := openPebbleDB("R", 16<<20)
 	db_s, _ := openPebbleDB("S", 16<<20)
 
-	pk_s, pk_r := generateData(10000000, 10000000, 0.2, 4, 4, false, 10)
+	pk_s, pk_r := generateData(uint64(tuples), uint64(tuples), 0.2, 1, 1, false, 10)
 
-	data_r, err := readBinaryFile(file_path_r, 10000000)
-	if err != nil {
-		log.Fatal(err)
+	var skew float64
+	var data_r, data_s []uint64
+	// Read the data from the binary files
+	if strings.Contains(file_path_r, "skew") {
+		fmt.Sscanf(file_path_r, "skew_%f", &skew)
+		data_r, data_s = generateData(uint64(tuples), uint64(tuples), 0.2, 1, skew, true, 10)
+	} else {
+		data_r, _ = readBinaryFile(file_path_r, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(data_r))
+		data_s, _ = readBinaryFile(file_path_s, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(data_s))
 	}
 	fmt.Printf("Read %d entries from binary file\n", len(data_r))
 	startTime := time.Now()
-	err = batchWriteDataToPebble(db_r, data_r, pk_r, 100000, "second", 10, 10, 50)
-	if err != nil {
-		log.Fatal(err)
-	}
+	batchWriteDataToPebble(db_r, data_r, pk_r, 100000, "second", 10, 10, totalValueSize)
+
 	duration := time.Since(startTime)
 	fmt.Printf("Write %d entries to Pebble R time: %v\n", len(data_r), duration)
 
-	data_s, err := readBinaryFile(file_path_s, 10000000)
-	if err != nil {
-		log.Fatal(err)
-	}
 	startTime = time.Now()
-	err = batchWriteDataToPebble(db_s, data_s, pk_s, 100000, "second", 10, 10, 50)
-	if err != nil {
-		log.Fatal(err)
-	}
+	batchWriteDataToPebble(db_s, data_s, pk_s, 100000, "second", 10, 10, totalValueSize)
+
 	duration = time.Since(startTime)
 	fmt.Printf("Write %d entries to Pebble S time: %v\n", len(data_s), duration)
 
@@ -48,8 +48,8 @@ func HJ(file_path_r string, file_path_s string) {
 	prefixS := "tmp/S_hj"
 
 	startTime = time.Now()
-	partitioning(db_r, prefixR, numBuckets, 50, 10, "second")
-	partitioning(db_s, prefixS, numBuckets, 50, 10, "second")
+	partitioning(db_r, prefixR, numBuckets, totalValueSize, 10, "second")
+	partitioning(db_s, prefixS, numBuckets, totalValueSize, 10, "second")
 	matches := probing(numBuckets, prefixR, prefixS)
 	duration = time.Since(startTime)
 	fmt.Printf("Hash join time: %v\n", duration)
@@ -155,44 +155,64 @@ func BKDRhash2(str string, buckets int) int {
 func HJ_P(file_path_r string, file_path_s string, tuples int, totalValueSize int) {
 	db_r, _ := openPebbleDB("R", 16<<20)
 	db_s, _ := openPebbleDB("S", 16<<20)
-	pk_s, pk_r := generateData(uint64(tuples), uint64(tuples), 0.2, 4, 4, false, totalValueSize)
+	pk_s, pk_r := generateData(uint64(tuples), uint64(tuples), 0.2, 1, 1, false, totalValueSize)
 
-	data_r, err := readBinaryFile(file_path_r, tuples)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Read %d entries from binary file\n", len(data_r))
-	startTime := time.Now()
-	err = batchWriteDataToPebble(db_r, data_r, pk_r, 100000, "second", 10, 10, totalValueSize)
-	if err != nil {
-		log.Fatal(err)
-	}
-	duration := time.Since(startTime)
-	fmt.Printf("Write %d entries to Pebble R time: %v\n", len(data_r), duration)
+	// data_r, err := readBinaryFile(file_path_r, tuples)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// fmt.Printf("Read %d entries from binary file\n", len(data_r))
+	// startTime := time.Now()
+	// err = batchWriteDataToPebble(db_r, data_r, pk_r, 100000, "second", 10, 10, totalValueSize)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// duration := time.Since(startTime)
+	// fmt.Printf("Write %d entries to Pebble R time: %v\n", len(data_r), duration)
 
-	data_s, err := readBinaryFile(file_path_s, tuples)
-	if err != nil {
-		log.Fatal(err)
+	// data_s, err := readBinaryFile(file_path_s, tuples)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// startTime = time.Now()
+	// err = batchWriteDataToPebble(db_s, data_s, pk_s, 100000, "primary", 10, 10, totalValueSize)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// duration = time.Since(startTime)
+	var skew float64
+	var dataR, dataS []uint64
+	// Read the data from the binary files
+	if strings.Contains(file_path_r, "skew") {
+		fmt.Sscanf(file_path_r, "skew_%f", &skew)
+		dataR, dataS = generateData(uint64(tuples), uint64(tuples), 0.2, 1, skew, true, 10)
+	} else {
+		dataR, _ = readBinaryFile(file_path_r, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(dataR))
+		dataS, _ = readBinaryFile(file_path_s, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(dataS))
 	}
-	startTime = time.Now()
-	err = batchWriteDataToPebble(db_s, data_s, pk_s, 100000, "primary", 10, 10, totalValueSize)
-	if err != nil {
-		log.Fatal(err)
-	}
-	duration = time.Since(startTime)
-	fmt.Printf("Write %d entries to Pebble S time: %v\n", len(data_s), duration)
+	batchWriteDataToPebble(db_r, dataR, pk_r, 100000, "second", 10, 10, totalValueSize)
+	batchWriteDataToPebble(db_s, dataS, pk_s, 100000, "primary", 10, 10, totalValueSize)
+
+	// count := 0
+	// itS, _ := db_s.NewIter(nil)
+	// for itS.First(); itS.Valid(); itS.Next() {
+	// 	count++
+	// }
+	// fmt.Printf("Total entries in S: %d\n", count)
 
 	// 分区和探测
 	numBuckets := 500
 	prefixR := "tmp/R_hj"
 	prefixS := "tmp/S_hj"
 
-	startTime = time.Now()
+	startTime := time.Now()
 	partitioning(db_r, prefixR, numBuckets, totalValueSize, 10, "second")
 	partitioning(db_s, prefixS, numBuckets, totalValueSize, 10, "primary")
 	matches := probing(numBuckets, prefixR, prefixS)
-	duration = time.Since(startTime)
-	fmt.Printf("Hash join time: %v\n", duration)
+	duration := time.Since(startTime)
+	fmt.Printf("!!!!Joining time: %v\n", duration)
 	fmt.Printf("!!!!Matches: %d\n", matches)
 
 	// 打印数据库状态

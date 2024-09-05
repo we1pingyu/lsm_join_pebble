@@ -15,27 +15,29 @@ func IndexNestedLoop(file_path_r string, file_path_s string, tuples int, rIndex 
 	defer db_r.Close()
 	defer db_s.Close()
 
-	pk_s, pk_r := generateData(uint64(tuples), uint64(tuples), 0.2, 4, 4, false, 10)
-	data_r, err := readBinaryFile(file_path_r, tuples)
-	if err != nil {
-		log.Fatal(err)
+	pk_s, pk_r := generateData(uint64(tuples), uint64(tuples), 0.2, 1, 1, false, 10)
+
+	var skew float64
+	var data_r, data_s []uint64
+	// Read the data from the binary files
+	if strings.Contains(file_path_r, "skew") {
+		fmt.Sscanf(file_path_r, "skew_%f", &skew)
+		data_r, data_s = generateData(uint64(tuples), uint64(tuples), 0.2, 1, skew, true, 10)
+	} else {
+		data_r, _ = readBinaryFile(file_path_r, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(data_r))
+		data_s, _ = readBinaryFile(file_path_s, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(data_s))
 	}
-	fmt.Printf("Read %d entries from binary file\n", len(data_r))
 
 	startTime := time.Now()
-	err = batchWriteDataToPebble(db_r, data_r, pk_r, 100000, "second", 10, 10, totalValueSize)
-	if err != nil {
-		log.Fatal(err)
-	}
+	batchWriteDataToPebble(db_r, data_r, pk_r, 100000, "second", 10, 10, totalValueSize)
 	duration := time.Since(startTime)
 	fmt.Printf("Write %d entries to Pebble R time: %v\n", len(data_r), duration)
 
-	data_s, err := readBinaryFile(file_path_s, tuples)
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	index_s, _ := openPebbleDB("S_Index", 16<<20)
+
+	startTime = time.Now()
 	defer index_s.Close()
 	if strings.Contains(sIndex, "Comp") {
 		if strings.Contains(sIndex, "covering") {
@@ -55,7 +57,7 @@ func IndexNestedLoop(file_path_r string, file_path_s string, tuples int, rIndex 
 				buildCoveringEagerIndex(db_s, index_s, data_s, pk_s, totalValueSize, 10, 10, false, 1000)
 			}
 		} else {
-			_ = batchWriteDataToPebble(db_s, data_s, pk_s, 100000, "second", 10, 10, 50)
+			_ = batchWriteDataToPebble(db_s, data_s, pk_s, 100000, "second", 10, 10, totalValueSize)
 			fmt.Printf("Write %d entries to Pebble S time: %v\n", len(data_s), duration)
 			if strings.Contains(sIndex, "Lazy") {
 				buildLazyIndex(index_s, data_s, pk_s, totalValueSize, 10, 10, 1000)
@@ -64,6 +66,10 @@ func IndexNestedLoop(file_path_r string, file_path_s string, tuples int, rIndex 
 			}
 		}
 	}
+
+	index_time := time.Since(startTime)
+
+	startTime = time.Now()
 
 	fmt.Println("Index nested loop joining...")
 	primarySize := 10
@@ -78,34 +84,19 @@ func IndexNestedLoop(file_path_r string, file_path_s string, tuples int, rIndex 
 
 	var matches uint64
 	var dataTime, indexTime, postTime float64
-	iter, _ := index_s.NewIter(nil)
-	count := 0
-	chunksize := 0
-	if strings.Contains(sIndex, "covering") {
-		chunksize = totalValueSize
-	} else {
-		chunksize = 10
-	}
-	for iter.First(); iter.Valid(); iter.Next() {
-		// fmt.Println(string(iter.Key()))
-		valueSplit := SplitStringEveryNChars(string(iter.Value()), chunksize)
-		count += len(valueSplit)
-	}
-	iter.Close()
-	fmt.Printf("Index S contains %d entries\n", count)
+
 	if strings.Contains(sIndex, "Eager") || strings.Contains(sIndex, "Lazy") {
 		for itR.First(); itR.Valid(); itR.Next() {
 			tmpR := string(itR.Value())[:secondarySize]
 
 			start := time.Now()
 			value, closer, err := index_s.Get([]byte(tmpR))
-			if err != nil {
-				// fmt.Println("=====================")
-				// log.Printf("Error getting value from index_s: %v", err)
-				// fmt.Println("value: ", string(value))
-				// fmt.Println("=====================")
+			if err == nil {
+				closer.Close()
+			} else {
 				continue
 			}
+
 			// fmt.Println("value: ", string(value))
 			indexTime += time.Since(start).Seconds()
 
@@ -118,10 +109,10 @@ func IndexNestedLoop(file_path_r string, file_path_s string, tuples int, rIndex 
 				for x := range valueSplit {
 					start := time.Now()
 					// fmt.Println("x: ", x)
-					value, closer2, err := db_s.Get([]byte(x[:primarySize]))
-					// fmt.Println("value: ", string(value))
-					if err != nil {
-						// log.Printf("Error getting value from db_s: %v", err)
+					value, closer, err := db_s.Get([]byte(x[:primarySize]))
+					if err == nil {
+						closer.Close()
+					} else {
 						continue
 					}
 					dataTime += time.Since(start).Seconds()
@@ -129,7 +120,6 @@ func IndexNestedLoop(file_path_r string, file_path_s string, tuples int, rIndex 
 					if string(value)[:secondarySize] == tmpR {
 						matches++
 					}
-					closer2.Close()
 				}
 			}
 			closer.Close()
@@ -157,8 +147,9 @@ func IndexNestedLoop(file_path_r string, file_path_s string, tuples int, rIndex 
 					if !strings.Contains(sIndex, "covering") {
 						start := time.Now()
 						value, closer, err := db_s.Get([]byte(itSKey[secondarySize:]))
-						if err != nil {
-							// log.Printf("Error getting value from db_s: %v", err)
+						if err == nil {
+							closer.Close()
+						} else {
 							continue
 						}
 						dataTime += time.Since(start).Seconds()
@@ -166,7 +157,6 @@ func IndexNestedLoop(file_path_r string, file_path_s string, tuples int, rIndex 
 						if string(value)[:secondarySize] == tmpS {
 							matches++
 						}
-						closer.Close()
 					} else {
 						matches++
 					}
@@ -182,7 +172,10 @@ func IndexNestedLoop(file_path_r string, file_path_s string, tuples int, rIndex 
 			}
 		}
 	}
+	join_time := time.Since(startTime)
 
+	fmt.Printf("!!!!Indexing time: %v\n", index_time)
+	fmt.Printf("!!!!Joining time: %v\n", join_time)
 	fmt.Printf("!!!!Matches: %d\n", matches)
 	fmt.Printf("Data retrieval time: %f\n", dataTime)
 	fmt.Printf("Index retrieval time: %f\n", indexTime)
@@ -196,23 +189,22 @@ func NestedLoop(file_path_r string, file_path_s string, tuples int, totalValueSi
 
 	dbR, _ := openPebbleDB("R", 16<<20)
 	dbS, _ := openPebbleDB("S", 16<<20)
-
+	var skew float64
+	var dataR, dataS []uint64
 	// Read the data from the binary files
-	dataR, err := readBinaryFile(file_path_r, tuples)
-	if err != nil {
-		log.Fatal(err)
+	if strings.Contains(file_path_r, "skew") {
+		fmt.Sscanf(file_path_r, "skew_%f", &skew)
+		dataR, dataS = generateData(uint64(tuples), uint64(tuples), 0.2, 1, skew, true, 10)
+	} else {
+		dataR, _ = readBinaryFile(file_path_r, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(dataR))
+		dataS, _ = readBinaryFile(file_path_s, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(dataS))
 	}
-	fmt.Printf("Read %d entries from binary file\n", len(dataR))
-
-	dataS, err := readBinaryFile(file_path_s, tuples)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Read %d entries from binary file\n", len(dataS))
 
 	// Write the data to the Pebble databases
-	pk_s, pk_r := generateData(uint64(tuples), uint64(tuples), 0.2, 4, 4, false, 10)
-	err = batchWriteDataToPebble(dbR, dataR, pk_r, 100000, "second", 10, 10, totalValueSize)
+	pk_s, pk_r := generateData(uint64(tuples), uint64(tuples), 0.2, 1, 1, false, 10)
+	err := batchWriteDataToPebble(dbR, dataR, pk_r, 100000, "second", 10, 10, totalValueSize)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -237,26 +229,9 @@ func NestedLoop(file_path_r string, file_path_s string, tuples int, totalValueSi
 			matches++
 		}
 	}
-	fmt.Printf("Joining time: %v\n", time.Since(start_time))
+
+	fmt.Printf("!!!!Joining time: %v\n", time.Since(start_time))
 	fmt.Printf("!!!!Matches: %d\n", matches)
 	dbR.Close()
 	dbS.Close()
-	
-}
-
-func main() {
-	NestedLoop("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", 1000000, 50)
-	HJ_P("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", 1000000, 50)
-	// IndexNestedLoop("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", "coveringComp", "Reg", 50)
-	// IndexNestedLoop("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", "Comp", "Reg", 50)
-	// IndexNestedLoop("/home/weiping/code/lsm_join_data/fb_200M_uint64", "/home/weiping/code/lsm_join_data/fb_200M_uint64", "coveringComp", "Reg")
-	// IndexNestedLoop("/home/weiping/code/lsm_join_data/fb_200M_uint64", "/home/weiping/code/lsm_join_data/fb_200M_uint64", "Comp", "Reg")
-	// IndexNestedLoop("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", 1000000, "Reg", "coveringLazy", 50)
-	// IndexNestedLoop("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", "Lazy", "Reg", 50)
-	// IndexNestedLoop("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", 1000000, "Reg", "Eager", 50)
-	// IndexNestedLoop("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", 1000000, "Reg", "Lazy", 50)
-	// SJ("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", 10000000, "Reg", "Eager", 50)
-	// SJ("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", 1000000, "Reg", "coveringEager", 50)
-	// SJ("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", 1000000, "Reg", "Lazy", 50)
-
 }

@@ -163,7 +163,7 @@ func mergeFiles(outputFile string, n, k int, prefix string) {
 	}
 }
 
-func SortMergeForEagerLazy(dbR, dbS *pebble.DB, itR, itS *pebble.Iterator, RIndex string, SIndex string, primarySize int, secondarySize int) int {
+func SortMergeForEagerLazy(dbR, dbS *pebble.DB, itR, itS *pebble.Iterator, RIndex string, SIndex string, primarySize int, secondarySize int, totalValueSize int) int {
 	matches := 0
 	count1, count2 := 0, 0
 	dataTime, indexTime, postTime := 0.0, 0.0, 0.0
@@ -177,13 +177,15 @@ func SortMergeForEagerLazy(dbR, dbS *pebble.DB, itR, itS *pebble.Iterator, RInde
 			tempSValue := string(itS.Value())
 
 			timer := time.Now()
-			valueSplitR := SplitStringEveryNChars(tempRValue, primarySize)
 			postTime += time.Since(timer).Seconds()
 
-			if strings.Contains(RIndex, "covering") || strings.Contains(RIndex, "Reg") {
+			if strings.Contains(RIndex, "covering") {
+				valueSplitR := SplitStringEveryNChars(tempRValue, totalValueSize)
+				// fmt.Println("valueSplitR: ", valueSplitR)
 				count1 += len(valueSplitR)
 			} else {
 				timer = time.Now()
+				valueSplitR := SplitStringEveryNChars(tempRValue, primarySize)
 				uniqueValues := make(map[string]struct{})
 				for chunk := range valueSplitR {
 					uniqueValues[chunk] = struct{}{}
@@ -193,8 +195,8 @@ func SortMergeForEagerLazy(dbR, dbS *pebble.DB, itR, itS *pebble.Iterator, RInde
 				for x := range uniqueValues {
 					timer = time.Now()
 					valueR, closer, err := dbR.Get([]byte(x[:primarySize]))
-					if err == nil && len(valueR) > 0 {
-						defer closer.Close()
+					if err == nil {
+						closer.Close()
 					}
 					dataTime += time.Since(timer).Seconds()
 
@@ -206,13 +208,16 @@ func SortMergeForEagerLazy(dbR, dbS *pebble.DB, itR, itS *pebble.Iterator, RInde
 			}
 
 			timer = time.Now()
-			valueSplitS := SplitStringEveryNChars(tempSValue, primarySize)
 			postTime += time.Since(timer).Seconds()
 
-			if strings.Contains(SIndex, "covering") || strings.Contains(SIndex, "Reg") {
+			if strings.Contains(SIndex, "covering") {
+				valueSplitS := SplitStringEveryNChars(tempSValue, totalValueSize)
+
 				count2 += len(valueSplitS)
 			} else {
 				timer = time.Now()
+				valueSplitS := SplitStringEveryNChars(tempSValue, primarySize)
+
 				uniqueValues := make(map[string]struct{})
 				for chunk := range valueSplitS {
 					uniqueValues[chunk] = struct{}{}
@@ -241,13 +246,9 @@ func SortMergeForEagerLazy(dbR, dbS *pebble.DB, itR, itS *pebble.Iterator, RInde
 			itR.Next()
 			itS.Next()
 		} else if tempRKey < tempSKey {
-			timer := time.Now()
 			itR.Next()
-			indexTime += time.Since(timer).Seconds()
 		} else {
-			timer := time.Now()
 			itS.Next()
-			indexTime += time.Since(timer).Seconds()
 		}
 	}
 
@@ -393,16 +394,23 @@ func SortMerge(dbR, dbS *pebble.DB, tuples int, itR, itS *pebble.Iterator, RInde
 	itR.First()
 	itS.First()
 	matches := 0
+	fmt.Println("RIndex: ", RIndex, "SIndex: ", SIndex)
 	// Determine which specialized sort merge join to use
+	start_time := time.Now()
 	if strings.Contains(RIndex, "Reg") {
 		fmt.Println("Sort merge with Reg")
 		matches = SingleIndexExternalSortMerge(dbR, dbS, tuples, itS, SIndex, primarySize, secondarySize, totalValueSize)
-	} else if strings.Contains(RIndex, "Lazy") || strings.Contains(RIndex, "Eager") || strings.Contains(SIndex, "Lazy") || strings.Contains(SIndex, "Eager") {
-		matches = SortMergeForEagerLazy(dbR, dbS, itR, itS, RIndex, SIndex, primarySize, secondarySize)
-	} else if strings.Contains(RIndex, "Comp") || strings.Contains(SIndex, "Comp") {
+	} else if (strings.Contains(RIndex, "Lazy") && strings.Contains(SIndex, "Lazy")) || (strings.Contains(SIndex, "Eager") && strings.Contains(RIndex, "Eager")) {
+		fmt.Println("Sort merge with Eager/Lazy")
+		matches = SortMergeForEagerLazy(dbR, dbS, itR, itS, RIndex, SIndex, primarySize, secondarySize, totalValueSize)
+	} else if strings.Contains(RIndex, "Comp") && strings.Contains(SIndex, "Comp") {
 		fmt.Println("Sort merge with Comp")
 		matches = SortMergeForComp(dbR, dbS, itR, itS, RIndex, SIndex, primarySize, secondarySize)
+	} else {
+		fmt.Println("Not supported")
 	}
+
+	fmt.Println("!!!!Joining Time: ", time.Since(start_time))
 	fmt.Println("!!!!Matches: ", matches)
 	// Close iterators
 	itR.Close()
@@ -523,16 +531,14 @@ func NonIndexExternalSortMerge(dbR, dbS *pebble.DB, tuples int, RIndex string, S
 func SingleIndexExternalSortMerge(dbR, dbS *pebble.DB, tuples int, itS *pebble.Iterator, SIndex string, primarySize int, secondarySize int, totalValueSize int) int {
 	fmt.Println("Performing external sort merge with single index...")
 
-	valueSize := totalValueSize
-
 	// Serialize data
-	runSize := int((16<<20-3*4096)/(primarySize+valueSize)/2) - 1
+	runSize := int((16<<20-3*4096)/(primarySize+totalValueSize)/2) - 1
 
 	prefixR := "R/_sj_output"
 	outputFileR := prefixR + ".txt"
 	numWaysR := tuples/runSize + 1
 	fmt.Println("Num ways R: ", numWaysR)
-	externalSort(dbR, outputFileR, numWaysR, runSize, valueSize, secondarySize, prefixR)
+	externalSort(dbR, outputFileR, numWaysR, runSize, totalValueSize, secondarySize, prefixR)
 	// Perform external sort on R
 	matches := 0
 	inR, err := os.Open(outputFileR)
@@ -641,34 +647,71 @@ func SJ(file_path_r string, file_path_s string, tuples int, rIndex string, sInde
 	defer db_r.Close()
 	defer db_s.Close()
 
-	pk_s, pk_r := generateData(uint64(tuples), uint64(tuples), 0.2, 4, 4, false, 10)
-	data_r, err := readBinaryFile(file_path_r, tuples)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Read %d entries from binary file\n", len(data_r))
-
-	startTime := time.Now()
-	err = batchWriteDataToPebble(db_r, data_r, pk_r, 100000, "second", 10, 10, 50)
-	if err != nil {
-		log.Fatal(err)
-	}
-	duration := time.Since(startTime)
-	fmt.Printf("Write %d entries to Pebble R time: %v\n", len(data_r), duration)
-
-	data_s, err := readBinaryFile(file_path_s, tuples)
-	if err != nil {
-		log.Fatal(err)
+	pk_s, pk_r := generateData(uint64(tuples), uint64(tuples), 0.2, 1, 1, false, 10)
+	var skew float64
+	var data_r, data_s []uint64
+	// Read the data from the binary files
+	if strings.Contains(file_path_r, "skew") {
+		fmt.Sscanf(file_path_r, "skew_%f", &skew)
+		data_r, data_s = generateData(uint64(tuples), uint64(tuples), 0.2, 1, skew, true, 10)
+	} else {
+		data_r, _ = readBinaryFile(file_path_r, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(data_r))
+		data_s, _ = readBinaryFile(file_path_s, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(data_s))
 	}
 
+	// batchWriteDataToPebble(db_r, data_r, pk_r, 100000, "second", 10, 10, 50)
+	//
+	// fmt.Printf("Write %d entries to Pebble R time: %v\n", len(data_r), duration)
+
+	// data_s, err := readBinaryFile(file_path_s, tuples)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+
+	start_time := time.Now()
+	index_r, _ := openPebbleDB("R_Index", 16<<20)
+	defer index_r.Close()
+	if strings.Contains(rIndex, "Comp") {
+		if strings.Contains(rIndex, "covering") {
+			buildCoveringCompositeIndex(db_r, index_r, data_r, pk_r, totalValueSize, 10, 10, false, 1000)
+		} else {
+			_ = batchWriteDataToPebble(db_r, data_r, pk_r, 100000, "second", 10, 10, totalValueSize)
+			buildCompositeIndex(index_r, data_r, pk_r, 10, 10, 1000)
+		}
+	}
+
+	if strings.Contains(rIndex, "Lazy") || strings.Contains(rIndex, "Eager") {
+		if strings.Contains(rIndex, "covering") {
+			if strings.Contains(rIndex, "Lazy") {
+				buildCoveringLazyIndex(db_r, index_r, data_r, pk_r, totalValueSize, 10, 10, false, 1000)
+			} else {
+				buildCoveringEagerIndex(db_r, index_r, data_r, pk_r, totalValueSize, 10, 10, false, 1000)
+			}
+		} else {
+			_ = batchWriteDataToPebble(db_r, data_r, pk_r, 100000, "second", 10, 10, totalValueSize)
+			if strings.Contains(sIndex, "Lazy") {
+				buildLazyIndex(index_r, data_r, pk_r, totalValueSize, 10, 10, 1000)
+			} else {
+				buildEagerIndex(index_r, data_r, pk_r, totalValueSize, 10, 10, 1000)
+			}
+		}
+	}
+	index_time := time.Since(start_time)
+
+	if strings.Contains(rIndex, "Reg") {
+		_ = batchWriteDataToPebble(db_r, data_r, pk_r, 100000, "second", 10, 10, totalValueSize)
+	}
+
+	start_time = time.Now()
 	index_s, _ := openPebbleDB("S_Index", 16<<20)
 	defer index_s.Close()
 	if strings.Contains(sIndex, "Comp") {
 		if strings.Contains(sIndex, "covering") {
-			buildCoveringCompositeIndex(db_s, index_s, data_s, pk_s, 50, 10, 10, false, 1000)
+			buildCoveringCompositeIndex(db_s, index_s, data_s, pk_s, totalValueSize, 10, 10, false, 1000)
 		} else {
-			_ = batchWriteDataToPebble(db_s, data_s, pk_s, 100000, "second", 10, 10, 50)
-			fmt.Printf("Write %d entries to Pebble S time: %v\n", len(data_s), duration)
+			_ = batchWriteDataToPebble(db_s, data_s, pk_s, 100000, "second", 10, 10, totalValueSize)
 			buildCompositeIndex(index_s, data_s, pk_s, 10, 10, 1000)
 		}
 	}
@@ -682,7 +725,6 @@ func SJ(file_path_r string, file_path_s string, tuples int, rIndex string, sInde
 			}
 		} else {
 			_ = batchWriteDataToPebble(db_s, data_s, pk_s, 100000, "second", 10, 10, totalValueSize)
-			fmt.Printf("Write %d entries to Pebble S time: %v\n", len(data_s), duration)
 			if strings.Contains(sIndex, "Lazy") {
 				buildLazyIndex(index_s, data_s, pk_s, totalValueSize, 10, 10, 1000)
 			} else {
@@ -690,22 +732,26 @@ func SJ(file_path_r string, file_path_s string, tuples int, rIndex string, sInde
 			}
 		}
 	}
+	index_time += time.Since(start_time)
+	fmt.Printf("!!!!Index time: %v\n", index_time)
 
 	if strings.Contains(sIndex, "Reg") {
 		_ = batchWriteDataToPebble(db_s, data_s, pk_s, 100000, "second", 10, 10, totalValueSize)
-		fmt.Printf("Write %d entries to Pebble S time: %v\n", len(data_s), duration)
 	}
 
 	fmt.Println("Sort merge joining...")
 
 	readOptions := &pebble.IterOptions{}
-	itR, _ := db_r.NewIter(readOptions)
+	itR, _ := index_r.NewIter(readOptions)
+	if strings.Contains(rIndex, "Reg") {
+		itR, _ = db_r.NewIter(readOptions)
+	}
 	defer itR.Close()
 
 	itS, _ := index_s.NewIter(readOptions)
 	defer itS.Close()
 
-	if strings.Contains(rIndex, "Comp") || strings.Contains(rIndex, "Eager") || strings.Contains(sIndex, "Comp") || strings.Contains(sIndex, "Eager") {
+	if !strings.Contains(rIndex, "Reg") && !strings.Contains(sIndex, "Reg") {
 		SortMerge(db_r, db_s, tuples, itR, itS, rIndex, sIndex, 10, 10, totalValueSize)
 	} else {
 		NonIndexExternalSortMerge(db_r, db_s, tuples, rIndex, sIndex, 10, 10, totalValueSize)
@@ -713,9 +759,256 @@ func SJ(file_path_r string, file_path_s string, tuples int, rIndex string, sInde
 
 }
 
-// func main() {
-// 	// SJ("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", 10000000, "Reg", "Reg", 50)
-// 	// SJ("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", 10000000, "Reg", "Comp", 50)
-// 	SJ("/home/weiping/code/lsm_join_data/movie_info_movie_id", "/home/weiping/code/lsm_join_data/cast_info_movie_id", 10000000, "Reg", "coveringEager", 50)
+func SJ_P(file_path_r, file_path_s string, tuples int, totalValueSize int) {
+	fmt.Println("Performing external sort merge with primary index...")
+	db_r, _ := openPebbleDB("R", 16<<20)
+	defer db_r.Close()
+	db_s, _ := openPebbleDB("S", 16<<20)
+	defer db_s.Close()
 
-// }
+	pk_s, pk_r := generateData(uint64(tuples), uint64(tuples), 0.2, 1, 1, false, 10)
+	var skew float64
+	var dataR, dataS []uint64
+	// Read the data from the binary files
+	if strings.Contains(file_path_r, "skew") {
+		fmt.Sscanf(file_path_r, "skew_%f", &skew)
+		dataR, dataS = generateData(uint64(tuples), uint64(tuples), 0.2, 1, skew, true, 10)
+	} else {
+		dataR, _ = readBinaryFile(file_path_r, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(dataR))
+		dataS, _ = readBinaryFile(file_path_s, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(dataS))
+	}
+	batchWriteDataToPebble(db_r, dataR, pk_r, 100000, "second", 10, 10, totalValueSize)
+	batchWriteDataToPebble(db_s, dataS, pk_s, 100000, "primary", 10, 10, totalValueSize)
+
+	start_time := time.Now()
+
+	readOptions := &pebble.IterOptions{}
+	it_s, _ := db_s.NewIter(readOptions)
+	defer it_s.Close()
+	it_s.First()
+	// Serialize data
+	runSize := int((16<<20-3*4096)/(10+totalValueSize)/2) - 1
+
+	prefixR := "R/_sj_output"
+	outputFileR := prefixR + ".txt"
+	numWaysR := tuples/runSize + 1
+	fmt.Println("Num ways R: ", numWaysR)
+	externalSort(db_r, outputFileR, numWaysR, runSize, 10, 10, prefixR)
+	// Perform external sort on R
+	matches := 0
+	inR, err := os.Open(outputFileR)
+	if err != nil {
+		log.Fatalf("Unable to open file R: %v", err)
+	}
+	defer inR.Close()
+
+	readerR := bufio.NewReader(inR)
+	lineR, err := readerR.ReadString('\n')
+	if err != nil {
+		log.Fatalf("Failed to read line from file R: %v", err)
+	}
+
+	count1, count2 := 1, 0
+	// count :=0
+
+	for it_s.Valid() && len(lineR) > 0 {
+		fieldsR := strings.Split(lineR, ",")
+		// fmt.Println("fieldsR: ", fieldsR)
+		if len(fieldsR) < 2 {
+			break
+		}
+		tempRKey := fieldsR[0]
+		// tempRValue := fieldsR[1]
+
+		tempSKey := string(it_s.Key()[:10])
+		// fmt.Println("RKey:", tempRKey, "SKey: ", tempSKey, tempRKey == tempSKey)
+		if tempRKey == tempSKey {
+			for {
+				nextLineR, err := readerR.ReadString('\n')
+				if err != nil {
+					break
+				}
+				nextFieldsR := strings.Split(nextLineR, ",")
+				if len(nextFieldsR) < 2 || nextFieldsR[0] != tempRKey {
+					lineR = nextLineR
+					break
+				}
+				count1++
+			}
+
+			count2++
+
+			for it_s.Next(); it_s.Valid(); it_s.Next() {
+				if tempSKey != string(it_s.Key()[:10]) {
+					break
+				}
+				count2++
+
+			}
+
+			// fmt.Println("count1: ", count1, "count2: ", count2)
+			matches += count1 * count2
+			count1 = 1
+			count2 = 0
+		} else if tempRKey < tempSKey {
+			lineR, err = readerR.ReadString('\n')
+			if err != nil {
+				break
+			}
+		} else {
+			it_s.Next()
+		}
+	}
+	duration := time.Since(start_time)
+	fmt.Printf("!!!!Joining time: %v\n", duration)
+	fmt.Println("!!!!Matches: ", matches)
+}
+
+func SJ_NP(file_path_r, file_path_s string, tuples int, rIndex string, totalValueSize int) {
+	fmt.Println("Performing external sort merge with single index...")
+	primarySize := 10
+	secondarySize := 10
+	db_r, _ := openPebbleDB("R", 16<<20)
+	defer db_r.Close()
+	db_s, _ := openPebbleDB("S", 16<<20)
+	defer db_s.Close()
+
+	pk_s, pk_r := generateData(uint64(tuples), uint64(tuples), 0.2, 1, 1, false, 10)
+	var skew float64
+	var dataR, dataS []uint64
+	// Read the data from the binary files
+	if strings.Contains(file_path_r, "skew") {
+		fmt.Sscanf(file_path_r, "skew_%f", &skew)
+		dataR, dataS = generateData(uint64(tuples), uint64(tuples), 0.2, 1, skew, true, 10)
+	} else {
+		dataR, _ = readBinaryFile(file_path_r, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(dataR))
+		dataS, _ = readBinaryFile(file_path_s, tuples)
+		fmt.Printf("Read %d entries from binary file\n", len(dataS))
+	}
+	// batchWriteDataToPebble(db_r, dataR, pk_r, 100000, "second", 10, 10, totalValueSize)
+	batchWriteDataToPebble(db_s, dataS, pk_s, 100000, "primary", 10, 10, totalValueSize)
+
+	// Serialize data
+	startTime := time.Now()
+	index_r, _ := openPebbleDB("R_Index", 16<<20)
+	defer index_r.Close()
+	if strings.Contains(rIndex, "Comp") {
+		if strings.Contains(rIndex, "covering") {
+			buildCoveringCompositeIndex(db_r, index_r, dataR, pk_r, totalValueSize, 10, 10, false, 1000)
+		} else {
+			_ = batchWriteDataToPebble(db_r, dataR, pk_r, 100000, "second", 10, 10, totalValueSize)
+			buildCompositeIndex(index_r, dataR, pk_r, 10, 10, 1000)
+		}
+	}
+
+	if strings.Contains(rIndex, "Lazy") || strings.Contains(rIndex, "Eager") {
+		if strings.Contains(rIndex, "covering") {
+			if strings.Contains(rIndex, "Lazy") {
+				buildCoveringLazyIndex(db_r, index_r, dataR, pk_s, totalValueSize, 10, 10, false, 1000)
+			} else {
+				buildCoveringEagerIndex(db_r, index_r, dataR, pk_s, totalValueSize, 10, 10, false, 1000)
+			}
+		} else {
+			_ = batchWriteDataToPebble(db_r, dataR, pk_r, 100000, "second", 10, 10, totalValueSize)
+			// fmt.Printf("Write %d entries to Pebble S time: %v\n", len(dataR), duration)
+			if strings.Contains(rIndex, "Lazy") {
+				buildLazyIndex(index_r, dataR, pk_r, totalValueSize, 10, 10, 1000)
+			} else {
+				buildEagerIndex(index_r, dataR, pk_r, totalValueSize, 10, 10, 1000)
+			}
+		}
+	}
+	index_duration := time.Since(startTime)
+	// Perform external sort on R
+	matches := 0
+
+	// timer := time.Now()
+	count1, count2 := 1, 0
+	// count :=0
+	itS, _ := db_s.NewIter(nil)
+	itS.First()
+	itR, _ := index_r.NewIter(nil)
+	itR.First()
+	defer itR.Close()
+	defer itS.Close()
+
+	fmt.Println("Sort merge joining...")
+	startTime = time.Now()
+	for itS.Valid() && itR.Valid() {
+		tempSKey := string(itS.Key()[:secondarySize])
+		// tempRValue := fieldsR[1]
+
+		tempRKey := string(itR.Key()[:secondarySize])
+		tempPKey := string(itR.Key()[secondarySize:])
+		tempRValue := string(itR.Value())
+		if tempRKey == tempSKey {
+			for {
+				itS.Next()
+				if string(itS.Key()[:secondarySize]) != tempRKey || !itS.Valid() {
+					break
+				}
+				count1++
+			}
+			if strings.Contains(rIndex, "Comp") {
+				if strings.Contains(rIndex, "covering") {
+					count2++
+				} else {
+					valueS, closer, err := db_r.Get([]byte(tempPKey))
+					if err == nil {
+						closer.Close()
+					}
+					if string(valueS)[:secondarySize] == tempSKey {
+						count2++
+					}
+				}
+				for itR.Next(); itR.Valid(); itR.Next() {
+					if tempSKey != string(itR.Key()[:secondarySize]) {
+						break
+					}
+					if strings.Contains(rIndex, "covering") {
+						count2++
+					} else {
+						tempPKey := string(itR.Key()[secondarySize:])
+						valueS, closer, err := db_r.Get([]byte(tempPKey))
+						if err == nil {
+							closer.Close()
+						}
+						if string(valueS)[:secondarySize] == tempRKey {
+							count2++
+						}
+					}
+				}
+			} else {
+				if strings.Contains(rIndex, "covering") {
+					valueSplit := SplitStringEveryNChars(tempRValue, totalValueSize)
+					count2 += len(valueSplit)
+				} else {
+					valueSplit := SplitStringEveryNChars(tempRValue, primarySize)
+					for x := range valueSplit {
+						valueS, closer, err := db_r.Get([]byte(x[:primarySize]))
+						if err == nil {
+							closer.Close()
+						}
+						if len(valueS) > 0 && string(valueS)[:secondarySize] == tempSKey {
+							count2++
+						}
+					}
+				}
+			}
+			// fmt.Println("count1: ", count1, "count2: ", count2)
+			matches += count1 * count2
+			count1 = 1
+			count2 = 0
+		} else if tempRKey < tempSKey {
+			itR.Next()
+		} else {
+			itS.Next()
+		}
+	}
+	fmt.Println("!!!!Indexing time: ", index_duration)
+	fmt.Println("!!!!Joining time: ", time.Since(startTime))
+	fmt.Println("!!!!Matches: ", matches)
+}

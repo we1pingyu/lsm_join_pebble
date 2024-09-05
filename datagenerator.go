@@ -144,7 +144,7 @@ func randomNumber(n int) uint64 {
 	return rand.Uint64() % modulus
 }
 
-func calculateAverageRepetitions(data []uint64) float64 {
+func calculateAverageRepetitions(data []uint64) (float64, map[uint64]int) {
 	counts := make(map[uint64]int)
 	for _, value := range data {
 		counts[value]++
@@ -156,7 +156,8 @@ func calculateAverageRepetitions(data []uint64) float64 {
 	}
 
 	averageRepetitions := float64(totalRepetitions) / float64(len(counts))
-	return averageRepetitions
+	fmt.Println("Total Repetitions: ", totalRepetitions, len(counts))
+	return averageRepetitions, counts
 }
 
 // func main() {
